@@ -1,0 +1,57 @@
+ The difference between spin lock spin_lock, spin_lock_irq and spin_lock_irqsave
+September 20, 2018 2.04k views 0 comments 2 likes
+
+table of Contents [隐藏]
+
+    1 why spin locks are needed
+        1.1 why spin locks prohibit preemption
+        1.2 Why Critical Zones Forbid Sleep 
+    2 difference of spin_lock series
+    3what type of spin lock to use
+        3.1 spin_lock usage scenario
+        3.2 spin_lock_irq usage scenario
+        3.3 spin_lock_irqsave usage scenario
+        3.4 spin_lock_bh usage scenario 
+    4 concluding remarks 
+
+Most people who can stay and read this article have already understood what a spin lock is, at least knowing that the spin lock is constantly asking whether the resource has a prepared lock. This is easy to understand conceptually. His inner is easy to achieve.
+Why spin locks are needed
+
+Many times we cannot use other locks, such as read-write locks, mutex locks, semaphores, etc. On the one hand, these locks will switch context. His time is unpredictable. For some simple and extremely short critical sections, it is completely a performance loss; on the other hand, sleep is not allowed in the interrupt context, except for spin locks. Any other form of lock may cause sleep or process switching. This is contrary to the original design intention of the interrupt and an unpredictable error will occur. Based on two points, we need a spin lock, which is irreplaceable.
+Why spin locks prohibit preemption
+
+This is actually very easy to understand. When a CPU acquires a spin lock, it starts to execute the critical section code. At this time, assuming that its time slice is finished, the process schedule will actively trigger the schedule to transfer it away and execute another thread. / Process, it turns out that this thread / process also needs to use the spin lock, and the last thread / process still stays in the critical region and has not released the lock, resulting in the process unable to acquire the lock and form a deadlock. In order to avoid such situations, the spin lock directly prohibits the setting of a preemption flag on the critical section that has begun operation.
+Why Critical Zones Forbid Sleep
+
+If the spinlock is locked and then goes to sleep, and processor preemption cannot be performed at this time, the kernel's retriever cannot call other processes to obtain the CPU, which causes the CPU to be suspended; at the same time, the process cannot wake up automatically and Holding the spin lock all the time will further cause deadlock in other places where the spin lock is used.
+The difference of spin_lock series
+
+Each lock has its own reason. The spin_lock series locks are various spin lock variants that are added to solve this problem one after another. This is also in line with modern computer code design logic. The first is to solve the problem. After the problem is resolved, the crash problem is finally the performance problem. No design can escape such a framework.
+
+The reason for the spin_lock has been described above. The goal is to solve the problem of fast access to the critical section in the current kernel in some scenarios, so he disabled the scheduler preemption, so no other process will preempt. The condition of this CPU. However, in order to be able to respond to various external messages faster, modern computers have various types of interrupts, such as the arrival of a network card interrupt, which will definitely interrupt the process of the executing CPU, even if the current program is locked by spin_lock. Staying, assuming the current interrupt also needs to access the spin_lock lock, then a deadlock will occur, as shown in the figure:
+
+So in order to cope with the situation that the spin lock appears in the hardware interrupt and the process context at the same time, before the spin lock of the critical section code segment of the process is locked, the current CPU interrupt should be turned off first, so no matter what happens to you, Once locked, the CPU will no longer be stolen by any situation. This is the reason why spin_lock_irq appears. Of course, the need to turn off interrupts will cause the system's response to decrease, and more code will be executed, which may cause performance degradation. .
+
+So why does spin_lock_irqsave need to exist? It was said before that the appearance of each type variant is to solve practical problems, then the appearance of this type lock is also to solve some practical problems. as the picture shows:
+
+It can be seen from the figure that when the process has executed the first spin_lock_irq (& lock1), it has closed the interrupt, and then continues to acquire the second spin lock spin_lock_irq (& lock2). After lock2 is unlocked and lock1 is not unlocked, this area In a state where hardware interrupts are enabled, this code is still in the critical section of lock1. If a hardware interrupt also needs to apply for lock1 at this time, it will cause a deadlock. This is because spin_unlock_irq will open the local CPU interrupt when unlocked. As a result, hardware interrupts can re-enforce the CPU, so the best way is to save the current interrupt state before lock2 and restore the current interrupt state when unlocking, which is why spin_lock_irqsave needs to exist. Naturally, this is a more thread-safe solution, but it will bring more performance losses than the previous ones.
+What type of spin lock to use
+
+Now that you know the three variants of spin locks, what kind of locks are suitable under what circumstances?
+spin_lock usage scenario
+
+First of all, if the entire critical section is only located in the process context or work queue, then only the most convenient spin_lock can be used, because it will not happen to interrupt the preemption of the lock, even if interrupting the preemption of the process context will not cause an interruption due to the application Rotating a lock and causing a deadlock.
+
+Another situation is that you can consider using spin_lock in hardware interrupts, because there is no nesting of hardware interrupts (this may not necessarily be the case, depending on the platform), so only simple locking is required, and you don't need to turn off interrupts. Save stack etc.
+spin_lock_irq usage scenario
+
+This lock variant is suitable for use in a combination of process context / soft interrupt + hardware interrupt. Taskset is also a kind of soft interrupt, so it also falls into this category. Of course, this type of variant is also suitable for the combination of soft interrupts / taskset + process context, because hardware interrupts are turned off and soft interrupt code execution is prohibited from the source. However, the best way for this type of interrupt is to use spin_lock_bh Method, because it only locks the soft interrupt code execution and does not turn off the hardware interrupt, so the performance loss is smaller.
+spin_lock_irqsave usage scenario
+
+This type of use is the safest and most convenient way. After all, there is no need to consider whether deadlock will occur (the deadlock introduced by the code itself is not in this category), but it is also the code with the highest performance loss. Not applicable. On high-speed devices, spin locks have become a bottleneck that degrades performance. It is best to use it only in code that cannot determine whether the interrupt is turned off before it needs to try spin_lock. If the code can determine that the interrupt must be turned on before the lock is executed, then spin_lock_irq is a better choice.
+spin_lock_bh usage scenario
+
+This type of variant is a lighter variant than spin_lock_irq. It only turns off the bottom half of the interrupt. In fact, it disables preemption capabilities such as soft interrupts, Taskset, and Timer. If the developer determines that the critical section of the code written only exists The combination of soft interrupt / Taskset / Timer + process context, it is best to consider using a lock such as spin_lock_bh to prevent soft interrupt from preempting. There is also the need for soft interrupts and soft interrupts to preempt access to critical sections. Interrupt locks above spin_lock_bh also need to be used, because during the execution of a soft interrupt, it may be interrupted by a hardware interrupt itself, and then the same code is executed. Fortunately, the execution in other CPUs is good. After all, soft interrupts can execute the same interrupt function on different CPUs, but if it is unfortunately running on the same CPU, it will cause a deadlock. Taskset Because the clock will only run one instance during the running process, there is no deadlock problem. The lock competition between Taskset and Taskset only needs to use spin_lock.
+Concluding remarks
+
+The use of spin_lock does not seem complicated, but if it is not used properly, it will cause a lot of unpredictable deadlocks. At present, the Linux kernel has countless problems caused by this lock every day. It is often seen that a patch that specifically fixes the wrong use is submitted. . However, from the perspective of performance, if it can be determined that there is no requisition of spin locks in the interrupt callbacks of the driver written by yourself, then spin_lock can be up, and spin_lock_irqsave can be used without it. This, of course, tests the level of the programmer. 
